@@ -16,6 +16,30 @@ ARG VITE_API_URL=
 RUN bun run build
 
 
+FROM python:3.14 AS backend-obfuscate
+
+RUN pip install --no-cache-dir pyarmor==9.2.6
+
+WORKDIR /src
+
+COPY ./backend/app ./app
+
+# Obfuscate everything except:
+# - the Alembic migrations, which Alembic reads and lists by filename and
+#   don't need protecting
+# - backend_pre_start.py/initial_data.py/tests_pre_start.py, which prestart.sh
+#   and tests-start.sh run directly as `python app/foo.py` rather than
+#   importing as `app.foo`; PyArmor's package-relative runtime import only
+#   resolves when the file is imported, not run standalone, and these hold no
+#   logic worth protecting anyway
+RUN pyarmor gen -O /obfuscated -i --prefix app --enable jit -r \
+    --exclude "app/alembic*" \
+    --exclude "app/backend_pre_start.py" \
+    --exclude "app/initial_data.py" \
+    --exclude "app/tests_pre_start.py" \
+    app
+
+
 FROM python:3.14
 
 ENV PYTHONUNBUFFERED=1
@@ -49,7 +73,13 @@ COPY ./backend/scripts /app/backend/scripts
 
 COPY ./backend/pyproject.toml ./backend/alembic.ini /app/backend/
 
-COPY ./backend/app /app/backend/app
+COPY --from=backend-obfuscate /obfuscated/app /app/backend/app
+
+COPY ./backend/app/alembic /app/backend/app/alembic
+
+COPY ./backend/app/email-templates /app/backend/app/email-templates
+
+COPY ./backend/app/backend_pre_start.py ./backend/app/initial_data.py ./backend/app/tests_pre_start.py /app/backend/app/
 
 COPY --from=frontend-build /app/backend/app/frontend /app/backend/app/frontend
 
