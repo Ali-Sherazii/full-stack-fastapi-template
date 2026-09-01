@@ -18,26 +18,21 @@ RUN bun run build
 
 FROM python:3.14 AS backend-obfuscate
 
-RUN pip install --no-cache-dir pyarmor==9.2.6
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir cython==3.3.0 setuptools==84.0.0
 
 WORKDIR /src
 
 COPY ./backend/app ./app
+COPY ./backend/cythonize_build.py .
 
-# Obfuscate everything except:
-# - the Alembic migrations, which Alembic reads and lists by filename and
-#   don't need protecting
-# - backend_pre_start.py/initial_data.py/tests_pre_start.py, which prestart.sh
-#   and tests-start.sh run directly as `python app/foo.py` rather than
-#   importing as `app.foo`; PyArmor's package-relative runtime import only
-#   resolves when the file is imported, not run standalone, and these hold no
-#   logic worth protecting anyway
-RUN pyarmor gen -O /obfuscated -i --prefix app --enable jit -r \
-    --exclude "app/alembic*" \
-    --exclude "app/backend_pre_start.py" \
-    --exclude "app/initial_data.py" \
-    --exclude "app/tests_pre_start.py" \
-    app
+# Compile app/ to native extension modules and drop the Python source, so no
+# readable source ships for that code - see cythonize_build.py for exactly
+# what's compiled, what's deliberately left as plain .py, and why.
+RUN python cythonize_build.py
 
 
 FROM python:3.14
@@ -73,13 +68,12 @@ COPY ./backend/scripts /app/backend/scripts
 
 COPY ./backend/pyproject.toml ./backend/alembic.ini /app/backend/
 
-COPY --from=backend-obfuscate /obfuscated/app /app/backend/app
-
-COPY ./backend/app/alembic /app/backend/app/alembic
-
-COPY ./backend/app/email-templates /app/backend/app/email-templates
-
-COPY ./backend/app/backend_pre_start.py ./backend/app/initial_data.py ./backend/app/tests_pre_start.py /app/backend/app/
+# /src/app from the obfuscate stage already has the compiled .so modules
+# alongside the plain-.py/asset files cythonize_build.py never touched
+# (alembic/, email-templates/, the three bootstrap scripts) - one copy
+# carries all of it, unlike PyArmor's output which held only what it
+# processed.
+COPY --from=backend-obfuscate /src/app /app/backend/app
 
 COPY --from=frontend-build /app/backend/app/frontend /app/backend/app/frontend
 
